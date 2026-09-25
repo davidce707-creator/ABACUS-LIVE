@@ -11,7 +11,7 @@ export async function GET() {
       include: { attendees: true } // Show how many people are inside
     });
     return NextResponse.json(rooms);
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: "Failed to fetch rooms" }, { status: 500 });
   }
 }

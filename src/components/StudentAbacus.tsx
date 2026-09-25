@@ -5,8 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { logBeadDisplacement } from '@/app/actions/intelligence';
 import AbacusSeal from '@/components/AbacusSeal';
-import { db } from '@/lib/firebase';
-import { doc, setDoc, updateDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { supabase } from '@/lib/supabaseClient';
 
 const BEAD_SIZE = 48;
 const BEAD_GAP = 2;
@@ -29,59 +28,42 @@ export default function StudentAbacus({ roomId }: { roomId: string }) {
   const dragStartPositions = useRef<number[]>([]);
   const [positions, setPositions] = useState([...INITIAL_POSITIONS]);
 
-  // --- Presence tracking (Firestore real-time) ---
+  // --- Presence tracking — delete Prisma attendee on leave ---
   const markLobby = useCallback(() => {
-    if (!roomId || !seatId) return;
-    const presenceRef = doc(db, 'rooms', roomId, 'presence', seatId);
-    updateDoc(presenceRef, {
-      status: 'lobby',
-      roomId: null,
-      updatedAt: serverTimestamp(),
-    }).catch(() => {});
-
-    // Delete the Prisma attendee record so the seat is freed and polling doesn't restore the student
+    if (!roomId || !studentName) return;
     fetch(`/api/roster?roomId=${roomId}&name=${encodeURIComponent(studentName)}`, {
       method: 'DELETE',
     }).catch(() => {});
-
-    // Null out the student's slot in the FCFS seats array
-    const seatsRef = doc(db, 'rooms', roomId, 'meta', 'seats');
-    getDoc(seatsRef).then((snap) => {
-      if (!snap.exists()) return;
-      const slots: (string | null)[] = snap.data().slots;
-      const idx = slots.findIndex(s => s === studentName);
-      if (idx !== -1) {
-        slots[idx] = null;
-        setDoc(seatsRef, { slots });
-      }
-    }).catch(() => {});
-  }, [roomId, seatId, studentName]);
+  }, [roomId, studentName]);
 
   useEffect(() => {
-    if (!roomId || !seatId) return;
-
-    const presenceRef = doc(db, 'rooms', roomId, 'presence', seatId);
-
-    // Mark active on mount
-    setDoc(presenceRef, {
-      name: studentName,
-      seatId,
-      roomId,
-      status: 'active',
-      updatedAt: serverTimestamp(),
-    });
-
-    // Handle tab close / hard navigation
     const handleBeforeUnload = () => markLobby();
     window.addEventListener('beforeunload', handleBeforeUnload);
-
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
-      markLobby(); // cleanup on component unmount (e.g. back to lobby)
+      markLobby();
     };
-  }, [roomId, seatId, studentName, markLobby]);
+  }, [markLobby]);
 
-  // --- Heartbeat ---
+  // --- Realtime termination — instant on Room UPDATE isLive → false ---
+  useEffect(() => {
+    if (!roomId) return;
+    const channel = supabase
+      .channel(`room-status-${roomId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'Room', filter: `id=eq.${roomId}` },
+        (payload) => {
+          if (payload.new && (payload.new as { isLive: boolean }).isLive === false) {
+            setIsTerminated(true);
+          }
+        }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [roomId]);
+
+  // --- Heartbeat (fallback if Realtime misses) ---
   useEffect(() => {
     if (isTerminated || !roomId) return;
     const checkStatus = async () => {

@@ -14,7 +14,7 @@ export async function GET(req: Request) {
       where: { roomId }
     });
     return NextResponse.json(attendees);
-  } catch (error) {
+  } catch {
     return NextResponse.json([], { status: 500 });
   }
 }
@@ -29,7 +29,7 @@ export async function DELETE(req: Request) {
 
     await prisma.attendee.deleteMany({ where: { roomId, name } });
     return NextResponse.json({ success: true });
-  } catch (error) {
+  } catch {
     return NextResponse.json({ error: 'Failed to remove attendee' }, { status: 500 });
   }
 }

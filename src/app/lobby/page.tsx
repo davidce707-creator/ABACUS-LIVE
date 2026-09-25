@@ -5,8 +5,6 @@ import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { assignSeat } from '@/app/actions/intelligence';
-import { db } from '@/lib/firebase';
-import { doc, getDoc, setDoc, runTransaction } from 'firebase/firestore';
 
 function StudentLobbyContent() {
   const router = useRouter();
@@ -34,30 +32,6 @@ function StudentLobbyContent() {
     if (!res.success) {
       alert(res.error);
       return;
-    }
-
-    // FCFS seat assignment in Firestore (5-slot array)
-    try {
-      const seatsRef = doc(db, 'rooms', roomId, 'meta', 'seats');
-      await runTransaction(db, async (transaction) => {
-        const seatsSnap = await transaction.get(seatsRef);
-        const slots: (string | null)[] = seatsSnap.exists()
-          ? seatsSnap.data().slots
-          : [null, null, null, null, null];
-
-        // Check if student already has a seat
-        const existingIndex = slots.findIndex(s => s === guestName);
-        if (existingIndex !== -1) return; // already seated
-
-        // Find lowest empty index
-        const emptyIndex = slots.findIndex(s => s === null);
-        if (emptyIndex === -1) return; // all slots full
-
-        slots[emptyIndex] = guestName;
-        transaction.set(seatsRef, { slots });
-      });
-    } catch (e) {
-      console.error("Firestore seat assignment error:", e);
     }
 
     router.push(`/student/${roomId}?seat=${res.seatId}&name=${guestName}`);

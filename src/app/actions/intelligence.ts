@@ -158,7 +158,7 @@ export async function assignSeat(guestName: string, roomId: string) {
     }
 
     // Find available seats scoped to this room
-    const takenSeats = room.attendees.map((a: any) => a.seatId);
+    const takenSeats = room.attendees.map(a => a.seatId);
     const availableSeat = allSeats.find(seat => !takenSeats.includes(seat));
 
     if (!availableSeat) return { success: false, error: "The room is full." };

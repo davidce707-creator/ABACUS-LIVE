@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import FacilitatorSeat from '@/components/FacilitatorSeat';
 import FacilitatorControls from '@/components/FacilitatorControls';
-import { db } from '@/lib/firebase';
-import { collection, query, where, onSnapshot, doc } from 'firebase/firestore';
+import { supabase } from '@/lib/supabaseClient';
+
 
 interface Room {
   id: string;
@@ -49,7 +49,6 @@ export default function MirrorDashboard({ roomId }: { roomId: string }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [roster, setRoster] = useState<Record<string, string>>({});
   const [signals, setSignals] = useState<Record<string, Signal>>({});
-  const [seatSlots, setSeatSlots] = useState<(string | null)[]>([null, null, null, null, null]);
 
   // Fetch room metadata (title + capacity)
   useEffect(() => {
@@ -65,94 +64,38 @@ export default function MirrorDashboard({ roomId }: { roomId: string }) {
   }, [roomId]);
 
   // Prisma roster as the reliable source of truth for student names
+  const fetchRoster = useCallback(async () => {
+    if (!roomId) return;
+    try {
+      const res = await fetch(`/api/roster?roomId=${roomId}`);
+      const data: Attendee[] = await res.json();
+      const map: Record<string, string> = {};
+      data.forEach(a => { map[a.seatId] = a.name; });
+      setRoster(map);
+    } catch (e) { console.error("Roster error", e); }
+  }, [roomId]);
+
   useEffect(() => {
     if (!roomId) return;
-    const fetchRoster = async () => {
-      try {
-        const res = await fetch(`/api/roster?roomId=${roomId}`);
-        const data: Attendee[] = await res.json();
-        const map: Record<string, string> = {};
-        data.forEach(a => { map[a.seatId] = a.name; });
-        setRoster(map);
-      } catch (e) { console.error("Roster error", e); }
-    };
     fetchRoster();
     const interval = setInterval(fetchRoster, 3000);
     return () => clearInterval(interval);
-  }, [roomId]);
+  }, [roomId, fetchRoster]);
 
-  // Real-time presence overlay for instant departure detection (graceful — won't break if Firestore is unavailable)
+  // Supabase Realtime — instant roster update on Attendee INSERT/DELETE
   useEffect(() => {
-    if (!roomId || !db) return;
-    let unsubActive: (() => void) | undefined;
-    let unsubLobby: (() => void) | undefined;
+    if (!roomId) return;
+    const channel = supabase
+      .channel(`attendee-${roomId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'Attendee', filter: `roomId=eq.${roomId}` },
+        () => { fetchRoster(); }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [roomId, fetchRoster]);
 
-    try {
-      const presenceRef = collection(db, 'rooms', roomId, 'presence');
-
-      // Listen for departures → remove from roster instantly
-      unsubLobby = onSnapshot(
-        query(presenceRef, where('status', '==', 'lobby')),
-        (snapshot) => {
-          const departed = new Set<string>();
-          snapshot.forEach((d) => {
-            const data = d.data();
-            if (data.seatId) departed.add(data.seatId);
-          });
-          if (departed.size > 0) {
-            setRoster(prev => {
-              const updated = { ...prev };
-              departed.forEach(seatId => delete updated[seatId]);
-              return updated;
-            });
-          }
-        },
-        () => {} // Silently ignore Firestore errors — Prisma polling is the fallback
-      );
-
-      // Listen for arrivals → add to roster instantly
-      unsubActive = onSnapshot(
-        query(presenceRef, where('status', '==', 'active')),
-        (snapshot) => {
-          setRoster(prev => {
-            const updated = { ...prev };
-            snapshot.forEach((d) => {
-              const data = d.data();
-              if (data.seatId && data.name) {
-                updated[data.seatId] = data.name;
-              }
-            });
-            return updated;
-          });
-        },
-        () => {} // Silently ignore Firestore errors
-      );
-    } catch (e) {
-      console.warn("Firestore presence unavailable, using polling only");
-    }
-
-    return () => {
-      unsubActive?.();
-      unsubLobby?.();
-    };
-  }, [roomId]);
-
-  // Real-time FCFS seat slots listener (graceful)
-  useEffect(() => {
-    if (!roomId || !db) return;
-    let unsubscribe: (() => void) | undefined;
-    try {
-      const seatsRef = doc(db, 'rooms', roomId, 'meta', 'seats');
-      unsubscribe = onSnapshot(seatsRef, (snap) => {
-        if (snap.exists()) {
-          setSeatSlots(snap.data().slots);
-        }
-      }, () => {});
-    } catch (e) {
-      console.warn("Firestore seat slots unavailable");
-    }
-    return () => unsubscribe?.();
-  }, [roomId]);
 
   // Fetch signals
   useEffect(() => {
@@ -185,26 +128,27 @@ export default function MirrorDashboard({ roomId }: { roomId: string }) {
           )}
         </header>
 
-        {/* FCFS Seat Slots — real-time 5-slot presence bar */}
+        {/* Active Students bar — derived from live roster */}
         <div className="mb-10">
           <p className="text-[9px] font-mono text-gray-400 uppercase tracking-widest mb-4">Active Students</p>
           <div className="flex gap-3">
-            {seatSlots.map((name, i) => (
-              <div
-                key={i}
-                className={`flex-1 h-14 rounded-2xl border-2 flex items-center justify-center transition-all duration-500 ${
-                  name
-                    ? 'bg-green-50 border-green-300'
-                    : 'bg-gray-50 border-dashed border-gray-200'
-                }`}
-              >
-                {name ? (
-                  <span className="text-xs font-medium text-abacus-charcoal truncate px-2">{name}</span>
-                ) : (
-                  <span className="text-[9px] font-mono text-gray-300 uppercase">Slot {i + 1}</span>
-                )}
-              </div>
-            ))}
+            {Array.from({ length: 5 }, (_, i) => {
+              const name = Object.values(roster)[i] ?? null;
+              return (
+                <div
+                  key={i}
+                  className={`flex-1 h-14 rounded-2xl border-2 flex items-center justify-center transition-all duration-500 ${
+                    name ? 'bg-green-50 border-green-300' : 'bg-gray-50 border-dashed border-gray-200'
+                  }`}
+                >
+                  {name ? (
+                    <span className="text-xs font-medium text-abacus-charcoal truncate px-2">{name}</span>
+                  ) : (
+                    <span className="text-[9px] font-mono text-gray-300 uppercase">Slot {i + 1}</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 
